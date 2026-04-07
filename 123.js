@@ -117,13 +117,44 @@ function getDefaultMarkerPos() {
     return { x: x, y: y };
 }
 
+function isValidPoint(x, y) {
+    if (typeof x !== "number" || typeof y !== "number") return false;
+    if (isNaN(x) || isNaN(y)) return false;
+    try {
+        if (x < 0 || y < 0) return false;
+        if (x > device.width || y > device.height) return false;
+    } catch (e) {}
+    return true;
+}
+
 function doTap(x, y) {
     try {
+        if (!isValidPoint(x, y)) {
+            log("doTap invalid point: " + x + "," + y);
+            return false;
+        }
         return press(x, y, pressTime);
     } catch (e) {
         log("doTap error: " + e);
         return false;
     }
+}
+
+function doTapRepeat(x, y, count, intervalMs) {
+    var times = parseInt(count);
+    if (isNaN(times) || times <= 0) times = 1;
+
+    var gap = parseInt(intervalMs);
+    if (isNaN(gap) || gap < 0) gap = 60;
+
+    var ok = false;
+    for (var i = 0; i < times; i++) {
+        ok = doTap(x, y) || ok;
+        if (i < times - 1 && gap > 0) {
+            sleep(gap);
+        }
+    }
+    return ok;
 }
 
 function normalizeDelay(v, dft) {
@@ -190,6 +221,9 @@ function rebuildSkillOrder() {
     var skills = getActiveRole().skills;
     for (var i = 0; i < skills.length; i++) {
         skills[i].order = i + 1;
+        if (typeof skills[i].tapCount !== "number" || skills[i].tapCount <= 0) {
+            skills[i].tapCount = 1;
+        }
     }
 }
 
@@ -197,6 +231,9 @@ function rebuildSkillOrderFor(role) {
     if (!role || !role.skills) return;
     for (var i = 0; i < role.skills.length; i++) {
         role.skills[i].order = i + 1;
+        if (typeof role.skills[i].tapCount !== "number" || role.skills[i].tapCount <= 0) {
+            role.skills[i].tapCount = 1;
+        }
     }
 }
 
@@ -1026,7 +1063,7 @@ function manualTestSteps() {
                         }
                     }
 
-                    toggleSkillLoop();
+                    startSkillLoop(true);
                     sleep(300);
                 }
             }
@@ -1092,11 +1129,7 @@ function startMonitoring() {
 
                 if (ret.found) {
                     if (skillLoopRunning) {
-                        skillLoopRunning = false;
-                        skillLoopWorkerId += 1;
-                        execStepName = "";
-                        execRemainMs = 0;
-                        updateInfo();
+                        stopSkillLoop(false);
                         sleep(200);
                     }
 
@@ -1147,7 +1180,7 @@ function startMonitoring() {
                                     if (!monitoring) break;
                                 }
 
-                                toggleSkillLoop();
+                                startSkillLoop(true);
                                 sleep(300);
                             }
                         }
@@ -1212,21 +1245,28 @@ function sleepSkillDelay(totalMs, myWorkerId) {
     return true;
 }
 
-function toggleSkillLoop() {
+function stopSkillLoop(notify) {
+    if (!skillLoopRunning) return false;
+    skillLoopRunning = false;
+    skillLoopWorkerId += 1;
+    execStepName = "";
+    execRemainMs = 0;
+    updateInfo();
+    if (notify) toast("已请求停止技能循环");
+    return true;
+}
+
+function startSkillLoop(notify) {
     var role = getActiveRole();
     var skills = role.skills;
 
     if (!skills.length) {
         toast("当前角色没有技能点");
-        return;
+        return false;
     }
 
     if (skillLoopRunning) {
-        skillLoopRunning = false;
-        skillLoopWorkerId += 1;
-        updateInfo();
-        toast("已请求停止技能循环");
-        return;
+        return true;
     }
 
     skillLoopRunning = true;
@@ -1234,7 +1274,7 @@ function toggleSkillLoop() {
     var myWorkerId = skillLoopWorkerId;
 
     updateInfo();
-    toast("已开启技能循环: " + role.name);
+    if (notify) toast("已开启技能循环: " + role.name);
 
     threads.start(function () {
         try {
@@ -1250,11 +1290,14 @@ function toggleSkillLoop() {
                     if (myWorkerId !== skillLoopWorkerId) break;
 
                     var skill = list[i];
-                    execStepName = "技能[" + skill.name + "]";
+                    var tapCount = parseInt(skill.tapCount || 1);
+                    if (isNaN(tapCount) || tapCount <= 0) tapCount = 1;
+
+                    execStepName = "技能[" + skill.name + "] x" + tapCount;
                     execRemainMs = skill.delay;
                     updateInfo();
 
-                    doTap(skill.x, skill.y);
+                    doTapRepeat(skill.x, skill.y, tapCount, 60);
 
                     if (!sleepSkillDelay(skill.delay, myWorkerId)) {
                         break;
@@ -1262,7 +1305,7 @@ function toggleSkillLoop() {
                 }
             }
         } catch (e) {
-            log("toggleSkillLoop error: " + e);
+            log("startSkillLoop error: " + e);
         } finally {
             execStepName = "";
             execRemainMs = 0;
@@ -1272,6 +1315,13 @@ function toggleSkillLoop() {
             }
         }
     });
+
+    return true;
+}
+
+function toggleSkillLoop() {
+    if (skillLoopRunning) return stopSkillLoop(true);
+    return startSkillLoop(true);
 }
 
 // ===================== 角色管理 =====================
@@ -1333,8 +1383,7 @@ function deleteCurrentRoleDialog() {
         if (!ok) return;
 
         if (skillLoopRunning) {
-            skillLoopRunning = false;
-            skillLoopWorkerId += 1;
+            stopSkillLoop(false);
         }
 
         roles.splice(activeRoleIndex, 1);
@@ -1358,10 +1407,7 @@ function switchRoleDialog() {
         if (index < 0) return;
 
         if (skillLoopRunning) {
-            skillLoopRunning = false;
-            skillLoopWorkerId += 1;
-            execStepName = "";
-            execRemainMs = 0;
+            stopSkillLoop(false);
             toast("已停止旧角色循环，切换到新角色");
         }
 
@@ -1395,34 +1441,44 @@ function addSkillPointDialog() {
                 return;
             }
 
-            var skillName = String(name).trim() || ("技能" + (skills.length + 1));
-            var skillDelay = normalizeDelay(delay, 50);
-
-            var pos = getDefaultMarkerPos();
-
-            showMarkerAdjuster(
-                pos.x,
-                pos.y,
-                "拖动技能位置",
-                function(finalX, finalY) {
-                    skills.push({
-                        id: "skill_" + new Date().getTime() + "_" + random(1000, 9999),
-                        name: skillName,
-                        x: finalX,
-                        y: finalY,
-                        delay: skillDelay
-                    });
-                    rebuildSkillOrder();
-                    autoSave();
-                    updateInfo();
+            dialogs.rawInput("点击多少次", "1").then(function(tapCountInput) {
+                if (tapCountInput == null) {
                     dialogBusy = false;
-                    toast("已添加技能: " + skillName);
-                },
-                function() {
-                    dialogBusy = false;
-                    toast("已取消添加技能");
+                    return;
                 }
-            );
+
+                var skillName = String(name).trim() || ("技能" + (skills.length + 1));
+                var skillDelay = normalizeDelay(delay, 50);
+                var tapCount = normalizeDelay(tapCountInput, 1);
+                if (tapCount <= 0) tapCount = 1;
+
+                var pos = getDefaultMarkerPos();
+
+                showMarkerAdjuster(
+                    pos.x,
+                    pos.y,
+                    "拖动技能位置",
+                    function(finalX, finalY) {
+                        skills.push({
+                            id: "skill_" + new Date().getTime() + "_" + random(1000, 9999),
+                            name: skillName,
+                            x: finalX,
+                            y: finalY,
+                            delay: skillDelay,
+                            tapCount: tapCount
+                        });
+                        rebuildSkillOrder();
+                        autoSave();
+                        updateInfo();
+                        dialogBusy = false;
+                        toast("已添加技能: " + skillName + " x" + tapCount);
+                    },
+                    function() {
+                        dialogBusy = false;
+                        toast("已取消添加技能");
+                    }
+                );
+            });
         });
     });
 }
@@ -1440,7 +1496,7 @@ function showSkillList() {
     var items = [];
     for (var i = 0; i < skills.length; i++) {
         var s = skills[i];
-        items.push((i + 1) + ". " + s.name + " (" + s.x + "," + s.y + ") 等待:" + s.delay + "ms");
+        items.push((i + 1) + ". " + s.name + " (" + s.x + "," + s.y + ") 点击:" + (s.tapCount || 1) + "次 等待:" + s.delay + "ms");
     }
 
     dialogs.select("技能点列表 - " + role.name, items).then(function(index) {
@@ -1450,7 +1506,7 @@ function showSkillList() {
 
         dialogs.select(
             "技能：" + skill.name + "\n当前位置：(" + skill.x + ", " + skill.y + ")",
-            ["编辑位置", "修改等待时间", "上移", "下移", "删除", "取消"]
+            ["编辑位置", "修改等待时间", "修改点击次数", "上移", "下移", "删除", "取消"]
         ).then(function(op) {
             if (op == 0) {
                 showMarkerAdjuster(
@@ -1474,6 +1530,15 @@ function showSkillList() {
                     toast("已修改等待时间");
                 });
             } else if (op == 2) {
+                dialogs.rawInput("新的点击次数", String(skill.tapCount || 1)).then(function(v) {
+                    if (v == null) return;
+                    skill.tapCount = normalizeDelay(v, 1);
+                    if (skill.tapCount <= 0) skill.tapCount = 1;
+                    autoSave();
+                    updateInfo();
+                    toast("已修改点击次数");
+                });
+            } else if (op == 3) {
                 if (index > 0) {
                     var t = skills[index];
                     skills[index] = skills[index - 1];
@@ -1483,7 +1548,7 @@ function showSkillList() {
                     updateInfo();
                     toast("已上移");
                 }
-            } else if (op == 3) {
+            } else if (op == 4) {
                 if (index < skills.length - 1) {
                     var t2 = skills[index];
                     skills[index] = skills[index + 1];
@@ -1493,7 +1558,7 @@ function showSkillList() {
                     updateInfo();
                     toast("已下移");
                 }
-            } else if (op == 4) {
+            } else if (op == 5) {
                 skills.splice(index, 1);
                 rebuildSkillOrder();
                 autoSave();
@@ -1532,10 +1597,10 @@ function loadConfig() {
             var txt = files.read(CONFIG_PATH);
             var data = JSON.parse(txt);
 
-            pressTime = data.pressTime || 50;
+            pressTime = typeof data.pressTime === "number" ? data.pressTime : 50;
             watchText = data.watchText || "确认";
             watchRegion = data.watchRegion || null;
-            watchIntervalSec = data.watchIntervalSec || 2;
+            watchIntervalSec = typeof data.watchIntervalSec === "number" ? data.watchIntervalSec : 2;
 
             stepScenes = data.stepScenes || [];
             activeStepSceneIndex = typeof data.activeStepSceneIndex === "number" ? data.activeStepSceneIndex : 0;
@@ -1583,8 +1648,7 @@ function loadConfig() {
 function exitScript() {
     try {
         monitoring = false;
-        skillLoopRunning = false;
-        skillLoopWorkerId += 1;
+        stopSkillLoop(false);
         execStepName = "";
         execRemainMs = 0;
         nextOcrRemainSec = 0;
@@ -1604,8 +1668,7 @@ function exitScript() {
 
 events.on("exit", function () {
     monitoring = false;
-    skillLoopRunning = false;
-    skillLoopWorkerId += 1;
+    stopSkillLoop(false);
 });
 
 setTimeout(function() {
