@@ -6,10 +6,18 @@ var CONFIG_PATH = "/sdcard/ocr_skill_combo_stable_v2.json";
 
 // ===================== 全局配置 =====================
 // 单OCR配置
-var watchText = "确认";
+var watchText = "基本";
 var watchRegion = null;
-var watchIntervalSec = 2;
+var watchIntervalSec = 10;
 var pressTime = 50;
+var deathClickEnabled = true;
+var deathClickPoint = null;
+var deathClickWaitMs = 1000;
+var pickupText = "拾取";
+var pickupRegion = null;
+var pickupClickEnabled = false;
+var pickupClickPoint = null;
+var pickupReuseWatchRegion = true;
 
 // 多步骤场景
 var stepScenes = [];
@@ -66,7 +74,7 @@ function createMainWindow() {
     return floaty.window(
         <vertical padding="0">
             <horizontal id="titleBar" bg="#AA111111" padding="6">
-                <text id="title" text="OCR挂机控制台" textColor="#ffffff" textSize="12sp" w="0" layout_weight="1"/>
+                <text id="title" text="塔2挂机脚本" textColor="#ffffff" textSize="12sp" w="0" layout_weight="1"/>
                 <button id="mini" text="－" w="34" h="28" textSize="9sp"/>
             </horizontal>
 
@@ -195,7 +203,12 @@ function bindMiniWindowEvents() {
                 miniWinPos.x = parseInt(miniWin.getX());
                 miniWinPos.y = parseInt(miniWin.getY());
                 if (!moved) {
-                    if (canClickNow()) toggleMinimize();
+                    if (canClickNow()) {
+                        if (skillLoopRunning) {
+                            stopSkillLoop(false);
+                        }
+                        toggleMinimize();
+                    }
                 } else {
                     autoSave();
                 }
@@ -244,9 +257,10 @@ function safeParseInt(v, dft) {
     return isNaN(n) ? dft : n;
 }
 
-function regionText() {
-    if (!watchRegion) return "未设置";
-    return watchRegion.x + "," + watchRegion.y + "," + watchRegion.w + "," + watchRegion.h;
+function regionText(region) {
+    region = region || watchRegion;
+    if (!region) return "未设置";
+    return region.x + "," + region.y + "," + region.w + "," + region.h;
 }
 
 function formatExecTime(ms) {
@@ -305,6 +319,52 @@ function doTapRepeat(x, y, count, intervalMs) {
     return ok;
 }
 
+function getDragTargetPoint(x, y, direction, distance) {
+    distance = normalizeDelay(distance, 260);
+    var dx = 0;
+    var dy = 0;
+    var dir = String(direction || 'up').toLowerCase();
+    if (dir === 'down') dy = distance;
+    else if (dir === 'left') dx = -distance;
+    else if (dir === 'right') dx = distance;
+    else dy = -distance;
+
+    var tx = x + dx;
+    var ty = y + dy;
+    try {
+        tx = Math.max(1, Math.min(device.width - 1, tx));
+        ty = Math.max(1, Math.min(device.height - 1, ty));
+    } catch (e) {}
+    return { x: tx, y: ty };
+}
+
+function doStepAction(step) {
+    if (!step) return false;
+    var actionType = String(step.actionType || 'tap').toLowerCase();
+    if (actionType === 'drag') {
+        var target = getDragTargetPoint(step.x, step.y, step.dragDirection, step.dragDistance);
+        var duration = normalizeDelay(step.dragDurationMs, 500);
+        if (!isValidPoint(step.x, step.y) || !isValidPoint(target.x, target.y)) {
+            return false;
+        }
+        try {
+            return swipe(step.x, step.y, target.x, target.y, duration);
+        } catch (e) {
+            log('doStepAction swipe error: ' + e);
+            return false;
+        }
+    }
+    return doTap(step.x, step.y);
+}
+
+function getStepActionSummary(step) {
+    if (!step) return '点击';
+    if (String(step.actionType || 'tap').toLowerCase() === 'drag') {
+        return '拖动-' + String(step.dragDirection || 'up') + '-' + normalizeDelay(step.dragDistance, 260) + 'px-' + normalizeDelay(step.dragDurationMs, 500) + 'ms';
+    }
+    return '点击';
+}
+
 function normalizeDelay(v, dft) {
     var n = parseInt(v);
     if (isNaN(n) || n < 0) return dft;
@@ -322,6 +382,11 @@ function ensureScreenCaptureReady() {
     return screenCaptureReady;
 }
 
+function pointText(point) {
+    if (!point) return "未设置";
+    return point.x + "," + point.y;
+}
+
 function updateInfo(force) {
     try {
         if (!win) return;
@@ -329,10 +394,14 @@ function updateInfo(force) {
         var scene = getActiveStepScene();
 
         var lines = [];
-        lines.push("监控词: " + (watchText || "-"));
-        lines.push("识别范围: " + regionText());
+        lines.push("死亡识别: " + (watchText || "-"));
+        lines.push("死亡区域: " + regionText(watchRegion));
+        lines.push("拾取识别: " + (pickupText || "-"));
+        lines.push("拾取区域: " + (pickupReuseWatchRegion ? ("复用死亡区域(" + regionText(watchRegion) + ")") : regionText(pickupRegion)));
         lines.push("步骤场景: " + scene.name + " (" + scene.steps.length + "步)");
         lines.push("当前角色: " + role.name + " (" + role.skills.length + "技能)");
+        lines.push("死亡点击: 默认开启(" + pointText(deathClickPoint) + ") 等待" + deathClickWaitMs + "ms");
+        lines.push("拾取点击: " + (pickupClickEnabled ? ("开启(" + pointText(pickupClickPoint) + ")") : "关闭"));
         lines.push("OCR状态: " + (monitoring ? (sceneExecuting ? "执行场景中" : "监控中") : "未启动"));
         lines.push("技能状态: " + (skillLoopRunning ? "循环中" : "未启动"));
 
@@ -411,6 +480,18 @@ function rebuildStepOrder(scene) {
         if (typeof scene.steps[i].skillStartAfterMs !== "number") {
             scene.steps[i].skillStartAfterMs = 0;
         }
+        if (!scene.steps[i].actionType) {
+            scene.steps[i].actionType = "tap";
+        }
+        if (!scene.steps[i].dragDirection) {
+            scene.steps[i].dragDirection = "up";
+        }
+        if (typeof scene.steps[i].dragDurationMs !== "number" || scene.steps[i].dragDurationMs <= 0) {
+            scene.steps[i].dragDurationMs = 500;
+        }
+        if (typeof scene.steps[i].dragDistance !== "number" || scene.steps[i].dragDistance <= 0) {
+            scene.steps[i].dragDistance = 260;
+        }
     }
 }
 
@@ -483,14 +564,17 @@ function showTestMenu() {
     dialogs.select(
         "测试菜单",
         [
-            "手动测OCR",
-            "测试当前场景步骤"
+            "测试死亡识别",
+            "测试当前场景步骤",
+            "测试拾取识别"
         ]
     ).then(function(op) {
         if (op == 0) {
             manualTestOcr();
         } else if (op == 1) {
             manualTestSteps();
+        } else if (op == 2) {
+            manualTestOcrClick();
         }
     });
 }
@@ -524,34 +608,203 @@ function showConfigMenu() {
     });
 }
 
-function showOcrMenu() {
+function configureDeathDetectionDialog() {
     dialogs.select(
-        "OCR设置",
+        "死亡识别设置",
         [
-            "设置监控词+识别范围",
-            "修改OCR轮询间隔（秒）",
-            "修改点击按压时长（毫秒）"
+            "设置死亡识别文字+区域",
+            "设置死亡后点击位置",
+            "设置死亡后等待时间"
         ]
     ).then(function(op) {
         if (op == 0) {
             setWatchTextDialog();
         } else if (op == 1) {
-            dialogs.rawInput("OCR轮询间隔（秒）", String(watchIntervalSec || 2)).then(function(v) {
+            var pos = deathClickPoint || getDefaultMarkerPos();
+            showMarkerAdjuster(pos.x, pos.y, "拖动死亡后点击位置", function(finalX, finalY) {
+                deathClickPoint = { x: finalX, y: finalY };
+                autoSave();
+                updateInfo(true);
+                toast("已设置死亡后点击位置");
+            });
+        } else if (op == 2) {
+            dialogs.rawInput("死亡后等待时间(ms)", String(deathClickWaitMs || 1000)).then(function(v) {
                 if (v == null) return;
-                watchIntervalSec = normalizeDelay(v, 2);
+                deathClickWaitMs = normalizeDelay(v, 1000);
+                autoSave();
+                updateInfo(true);
+                toast("已设置死亡后等待时间");
+            });
+        }
+    });
+}
+
+function configurePickupDetectionDialog() {
+    function continuePickupRegionSetup() {
+        pickupClickEnabled = true;
+        if (!pickupClickPoint) {
+            pickupClickPoint = getDefaultMarkerPos();
+        }
+        autoSave();
+        updateInfo(true);
+
+        dialogs.select(
+            "拾取识别设置",
+            [
+                pickupReuseWatchRegion ? "改为单独设置拾取区域" : "改为复用死亡区域",
+                "设置拾取点击位置",
+                "设置拾取识别文字"
+            ]
+        ).then(function(op) {
+            if (op == 0) {
+                pickupReuseWatchRegion = !pickupReuseWatchRegion;
+                autoSave();
+                updateInfo(true);
+                if (!pickupReuseWatchRegion && !pickupRegion) {
+                    toast("请继续设置拾取识别区域");
+                    pickPickupRegionDialog();
+                } else {
+                    toast(pickupReuseWatchRegion ? "已改为复用死亡区域" : "已改为单独拾取区域");
+                }
+            } else if (op == 1) {
+                var pos = pickupClickPoint || getDefaultMarkerPos();
+                showMarkerAdjuster(pos.x, pos.y, "拖动拾取点击位置", function(finalX, finalY) {
+                    pickupClickPoint = { x: finalX, y: finalY };
+                    autoSave();
+                    updateInfo(true);
+                    toast("已设置拾取点击位置");
+                });
+            } else if (op == 2) {
+                dialogs.rawInput("拾取识别文字", pickupText || "拾取").then(function(v) {
+                    if (v == null) return;
+                    pickupText = String(v).trim() || "拾取";
+                    autoSave();
+                    updateInfo(true);
+                    toast("已设置拾取识别文字");
+                });
+            }
+        });
+    }
+
+    function pickPickupRegionDialog() {
+        toast("先点击拾取识别区域左上角");
+        pickOnePoint(function(x1, y1) {
+            toast("再点击拾取识别区域右下角");
+            pickOnePoint(function(x2, y2) {
+                var left = Math.min(x1, x2);
+                var top = Math.min(y1, y2);
+                var width = Math.abs(x2 - x1);
+                var height = Math.abs(y2 - y1);
+                if (width < 5 || height < 5) {
+                    toast("拾取识别区域太小，设置失败");
+                    return;
+                }
+                pickupRegion = { x: left, y: top, w: width, h: height };
+                autoSave();
+                updateInfo(true);
+                toast("已设置拾取识别区域");
+            }, "请点击拾取识别区域右下角");
+        }, "请点击拾取识别区域左上角");
+    }
+
+    dialogs.select(
+        "拾取识别设置",
+        [
+            "设置拾取识别文字",
+            pickupReuseWatchRegion ? "当前：复用死亡区域" : "当前：单独拾取区域",
+            "设置拾取点击位置",
+            "测试拾取识别点击"
+        ]
+    ).then(function(op) {
+        if (op == 0) {
+            dialogs.rawInput("拾取识别文字", pickupText || "拾取").then(function(v) {
+                if (v == null) return;
+                pickupText = String(v).trim() || "拾取";
+                pickupClickEnabled = true;
+                autoSave();
+                updateInfo(true);
+                toast("已设置拾取识别文字");
+            });
+        } else if (op == 1) {
+            if (!watchRegion) {
+                dialogs.confirm("拾取识别设置", "当前还没有设置死亡识别区域，是否先去设置？").then(function(ok) {
+                    if (!ok) return;
+                    setWatchTextDialog();
+                });
+                return;
+            }
+            continuePickupRegionSetup();
+        } else if (op == 2) {
+            var pos = pickupClickPoint || getDefaultMarkerPos();
+            showMarkerAdjuster(pos.x, pos.y, "拖动拾取点击位置", function(finalX, finalY) {
+                pickupClickPoint = { x: finalX, y: finalY };
+                pickupClickEnabled = true;
+                autoSave();
+                updateInfo(true);
+                toast("已设置拾取点击位置");
+            });
+        } else if (op == 3) {
+            manualTestOcrClick();
+        }
+    });
+}
+
+function manualTestOcrClick() {
+    var activeRegion = pickupReuseWatchRegion ? watchRegion : pickupRegion;
+    if (!pickupText || !String(pickupText).trim()) {
+        toast("请先设置拾取识别文字");
+        return;
+    }
+    if (!activeRegion) {
+        toast("请先设置拾取识别区域");
+        return;
+    }
+    if (!pickupClickPoint || !isValidPoint(pickupClickPoint.x, pickupClickPoint.y)) {
+        toast("请先设置拾取点击位置");
+        return;
+    }
+
+    threads.start(function () {
+        try {
+            if (!ensureScreenCaptureReady()) {
+                toast("截图权限获取失败");
+                return;
+            }
+            var ret = checkWatchText(pickupText, activeRegion);
+            if (ret && ret.found) {
+                doTap(pickupClickPoint.x, pickupClickPoint.y);
+                toast("拾取识别成功");
+            } else {
+                toast("未识别到拾取文字，未执行点击");
+            }
+        } catch (e) {
+            log("manualTestOcrClick error: " + e);
+            toast("测试拾取识别异常: " + e);
+        }
+    });
+}
+
+function showOcrMenu() {
+    dialogs.select(
+        "OCR设置",
+        [
+            "死亡识别设置",
+            "拾取识别设置",
+            "修改OCR轮询间隔（秒）"
+        ]
+    ).then(function(op) {
+        if (op == 0) {
+            configureDeathDetectionDialog();
+        } else if (op == 1) {
+            configurePickupDetectionDialog();
+        } else if (op == 2) {
+            dialogs.rawInput("OCR轮询间隔（秒）", String(watchIntervalSec || 10)).then(function(v) {
+                if (v == null) return;
+                watchIntervalSec = normalizeDelay(v, 10);
                 if (watchIntervalSec <= 0) watchIntervalSec = 1;
                 autoSave();
                 updateInfo();
                 toast("已设置OCR间隔");
-            });
-        } else if (op == 2) {
-            dialogs.rawInput("点击按压时长（毫秒）", String(pressTime || 50)).then(function(v) {
-                if (v == null) return;
-                pressTime = normalizeDelay(v, 50);
-                if (pressTime <= 0) pressTime = 50;
-                autoSave();
-                updateInfo();
-                toast("已设置按压时长");
             });
         }
     });
@@ -853,7 +1106,7 @@ function addStepDialog() {
             }
 
             dialogs.confirm("执行完这一步后开启技能循环？").then(function(enableSkillLoop) {
-                function finishAdd(skillStartAfterMs) {
+                function finishAdd(skillStartAfterMs, actionType, dragDirection, dragDurationMs, dragDistance) {
                     var stepName = String(name).trim() || ("步骤" + (sceneSteps.length + 1));
                     var stepDelay = normalizeDelay(delay, 1000);
                     var startWait = normalizeDelay(skillStartAfterMs, 0);
@@ -873,7 +1126,11 @@ function addStepDialog() {
                                 delay: stepDelay,
                                 enableSkillLoop: !!enableSkillLoop,
                                 skillStartAfterMs: startWait,
-                                validation: null
+                                validation: null,
+                                actionType: actionType || 'tap',
+                                dragDirection: dragDirection || 'up',
+                                dragDurationMs: normalizeDelay(dragDurationMs, 500),
+                                dragDistance: normalizeDelay(dragDistance, 260)
                             };
                             dialogs.confirm("步骤校验", "这个步骤执行后，是否需要等待指定文字出现/消失再继续？").then(function(needValidation) {
                                 if (!needValidation) {
@@ -902,16 +1159,49 @@ function addStepDialog() {
                     );
                 }
 
+                function askStepAction(skillStartAfterMs) {
+                    dialogs.select("步骤动作", ["点击", "拖动"]).then(function(actionIndex) {
+                        if (actionIndex == null || actionIndex < 0) {
+                            dialogBusy = false;
+                            return;
+                        }
+                        if (actionIndex === 0) {
+                            finishAdd(skillStartAfterMs, 'tap', 'up', 500, 260);
+                            return;
+                        }
+                        dialogs.select("拖动方向", ["上", "下", "左", "右"]).then(function(dirIndex) {
+                            if (dirIndex == null || dirIndex < 0) {
+                                dialogBusy = false;
+                                return;
+                            }
+                            var directionMap = ['up', 'down', 'left', 'right'];
+                            dialogs.rawInput("拖动多少毫秒", "500").then(function(dragDurationMs) {
+                                if (dragDurationMs == null) {
+                                    dialogBusy = false;
+                                    return;
+                                }
+                                dialogs.rawInput("拖动距离(px)", "260").then(function(dragDistance) {
+                                    if (dragDistance == null) {
+                                        dialogBusy = false;
+                                        return;
+                                    }
+                                    finishAdd(skillStartAfterMs, 'drag', directionMap[dirIndex], dragDurationMs, dragDistance);
+                                });
+                            });
+                        });
+                    });
+                }
+
                 if (enableSkillLoop) {
-                    dialogs.rawInput("开启技能前等待时间（毫秒）", "0").then(function(skillWait) {
+                    dialogs.rawInput("开始技能循环前等待（毫秒）", "0").then(function(skillWait) {
                         if (skillWait == null) {
                             dialogBusy = false;
                             return;
                         }
-                        finishAdd(skillWait);
+                        askStepAction(skillWait);
                     });
                 } else {
-                    finishAdd(0);
+                    askStepAction(0);
                 }
             });
         });
@@ -1043,7 +1333,10 @@ function showStepList() {
     var items = [];
     for (var i = 0; i < steps.length; i++) {
         var s = steps[i];
-        var flag = s.enableSkillLoop ? (" [开技能+" + (s.skillStartAfterMs || 0) + "ms]") : "";
+        var flag = " [动作:" + getStepActionSummary(s) + "]";
+        if (s.enableSkillLoop) {
+            flag += (" [开技能+" + (s.skillStartAfterMs || 0) + "ms]");
+        }
         flag += getStepValidationText(s);
         items.push((i + 1) + ". " + s.name + " (" + s.x + "," + s.y + ") 点击后等:" + s.delay + "ms" + flag);
     }
@@ -1054,8 +1347,8 @@ function showStepList() {
         var step = steps[index];
 
         dialogs.select(
-            "步骤：" + step.name + "\n当前位置：(" + step.x + ", " + step.y + ")" + getStepValidationText(step),
-            ["编辑位置", "切换开技能", "修改点击步骤后等待", "修改开始技能循环前等待", "修改步骤校验", "上移", "下移", "删除", "取消"]
+            "步骤：" + step.name + "\n当前位置：(" + step.x + ", " + step.y + ")\n动作：" + getStepActionSummary(step) + getStepValidationText(step),
+            ["编辑位置", "切换开技能", "修改点击步骤后等待", "修改开始技能循环前等待", "修改步骤动作", "修改步骤校验", "上移", "下移", "删除", "取消"]
         ).then(function(op) {
             if (op == 0) {
                 editStepPosition(step, function() {
@@ -1090,12 +1383,40 @@ function showStepList() {
                     toast("已修改开始技能循环前等待");
                 });
             } else if (op == 4) {
+                dialogs.select("步骤动作", ["点击", "拖动"]).then(function(actionIndex) {
+                    if (actionIndex == null || actionIndex < 0) return;
+                    if (actionIndex === 0) {
+                        step.actionType = 'tap';
+                        autoSave();
+                        updateInfo(true);
+                        toast('已修改步骤动作');
+                        return;
+                    }
+                    dialogs.select("拖动方向", ["上", "下", "左", "右"]).then(function(dirIndex) {
+                        if (dirIndex == null || dirIndex < 0) return;
+                        var directionMap = ['up', 'down', 'left', 'right'];
+                        dialogs.rawInput("拖动多少毫秒", String(step.dragDurationMs || 500)).then(function(v) {
+                            if (v == null) return;
+                            dialogs.rawInput("拖动距离(px)", String(step.dragDistance || 260)).then(function(distance) {
+                                if (distance == null) return;
+                                step.actionType = 'drag';
+                                step.dragDirection = directionMap[dirIndex];
+                                step.dragDurationMs = normalizeDelay(v, 500);
+                                step.dragDistance = normalizeDelay(distance, 260);
+                                autoSave();
+                                updateInfo(true);
+                                toast('已修改步骤动作');
+                            });
+                        });
+                    });
+                });
+            } else if (op == 5) {
                 configureStepValidationDialog(step, function(changed) {
                     if (!changed) return;
                     updateInfo(true);
                     toast("已更新步骤校验");
                 });
-            } else if (op == 5) {
+            } else if (op == 6) {
                 if (index > 0) {
                     var t = steps[index];
                     steps[index] = steps[index - 1];
@@ -1105,7 +1426,7 @@ function showStepList() {
                     updateInfo();
                     toast("已上移");
                 }
-            } else if (op == 6) {
+            } else if (op == 7) {
                 if (index < steps.length - 1) {
                     var t2 = steps[index];
                     steps[index] = steps[index + 1];
@@ -1115,7 +1436,7 @@ function showStepList() {
                     updateInfo();
                     toast("已下移");
                 }
-            } else if (op == 7) {
+            } else if (op == 8) {
                 steps.splice(index, 1);
                 rebuildStepOrder(scene);
                 autoSave();
@@ -1126,14 +1447,14 @@ function showStepList() {
     });
 }
 
-function setWatchTextDialog() {
+function setWatchTextDialog(onDone) {
     if (dialogBusy) {
         toast("当前已有操作未完成");
         return;
     }
     dialogBusy = true;
 
-    dialogs.rawInput("请输入监控词", watchText || "确认").then(function(text) {
+    dialogs.rawInput("请输入死亡识别文字", watchText || "基本").then(function(text) {
         if (text == null) {
             dialogBusy = false;
             return;
@@ -1173,7 +1494,8 @@ function setWatchTextDialog() {
 
                 autoSave();
                 updateInfo();
-                toast("已设置监控词和识别范围");
+                toast("已设置死亡识别文字和区域");
+                if (onDone) onDone();
             }, "请点击识别范围右下角");
         }, "请点击识别范围左上角");
     });
@@ -1187,13 +1509,34 @@ function normalizeOcrText(s) {
         .toLowerCase();
 }
 
+function getOcrResultCenter(r, region) {
+    try {
+        var points = r && (r.bounds || r.box || r.points);
+        if (points && points.length >= 4) {
+            var sumX = 0, sumY = 0;
+            for (var i = 0; i < points.length; i++) {
+                sumX += safeParseInt(points[i].x, 0);
+                sumY += safeParseInt(points[i].y, 0);
+            }
+            var cx = parseInt(sumX / points.length);
+            var cy = parseInt(sumY / points.length);
+            if (region) {
+                cx += region.x;
+                cy += region.y;
+            }
+            return { x: cx, y: cy };
+        }
+    } catch (e) {}
+    return null;
+}
+
 function checkWatchText(targetText, region) {
     var img = null;
     var detectImg = null;
 
     try {
         img = captureScreen();
-        if (!img) return { found: false, debugText: "" };
+        if (!img) return { found: false, debugText: "", clickPoint: null };
 
         detectImg = img;
         if (region) {
@@ -1208,6 +1551,7 @@ function checkWatchText(targetText, region) {
         var found = false;
         var arr = [];
         var targetNorm = normalizeOcrText(targetText);
+        var firstHitCenter = null;
 
         if (results && results.length > 0) {
             for (var i = 0; i < results.length; i++) {
@@ -1216,6 +1560,9 @@ function checkWatchText(targetText, region) {
                 arr.push(label);
                 if (normalizeOcrText(label).indexOf(targetNorm) >= 0) {
                     found = true;
+                    if (!firstHitCenter) {
+                        firstHitCenter = getOcrResultCenter(r, region);
+                    }
                 }
             }
         }
@@ -1225,10 +1572,10 @@ function checkWatchText(targetText, region) {
             found = true;
         }
 
-        return { found: found, debugText: arr.join(" | ") };
+        return { found: found, debugText: arr.join(" | "), clickPoint: firstHitCenter };
     } catch (e) {
         log("checkWatchText error: " + e);
-        return { found: false, debugText: "ERR: " + e };
+        return { found: false, debugText: "ERR: " + e, clickPoint: null };
     } finally {
         try {
             if (detectImg && detectImg !== img) detectImg.recycle();
@@ -1241,11 +1588,11 @@ function checkWatchText(targetText, region) {
 
 function manualTestOcr() {
     if (!watchText || !String(watchText).trim()) {
-        toast("请先设置监控词");
+        toast("请先设置死亡识别文字");
         return;
     }
     if (!watchRegion) {
-        toast("请先设置监控词并框选识别范围");
+        toast("请先设置死亡识别文字并框选识别区域");
         return;
     }
 
@@ -1262,14 +1609,15 @@ function manualTestOcr() {
                 : ("OCR识别失败：未命中【" + watchText + "】\n识别结果：" + ((ret && ret.debugText) || "(空)"));
 
             log("manualTestOcr => " + msg);
-            toast(ret && ret.found ? "OCR识别成功" : "OCR识别失败");
-            dialogs.alert("手动测试OCR", msg).then(function() {});
+            toast(ret && ret.found ? "死亡识别成功" : "死亡识别失败");
+            dialogs.alert("测试死亡识别", msg).then(function() {});
         } catch (e) {
             log("manualTestOcr error: " + e);
-            toast("手动测试OCR异常: " + e);
+            toast("测试死亡识别异常: " + e);
         }
     });
 }
+
 
 function manualTestSteps() {
     var scene = getActiveStepScene();
@@ -1294,7 +1642,7 @@ function manualTestSteps() {
                 monitorExecRemainMs = step.delay;
                 updateInfo();
 
-                doTap(step.x, step.y);
+                doStepAction(step);
 
                 var remain = step.delay;
                 while (remain > 0) {
@@ -1407,14 +1755,37 @@ function startMonitoring() {
                 updateInfo();
 
                 var currentScene = getActiveStepScene();
-                var ret = checkWatchText(watchText, watchRegion);
+                var pickupActiveRegion = pickupReuseWatchRegion ? watchRegion : pickupRegion;
+                var deathRet = checkWatchText(watchText, watchRegion);
+                var pickupRet = pickupClickEnabled && pickupText && pickupActiveRegion ? checkWatchText(pickupText, pickupActiveRegion) : { found: false };
                 if (!monitoring || myMonitoringWorkerId !== monitoringWorkerId) break;
 
-                var triggeredNow = ret.found && !lastWatchFound && !sceneExecuting;
-                lastWatchFound = !!ret.found;
+                if (pickupRet.found && pickupClickEnabled && pickupClickPoint && isValidPoint(pickupClickPoint.x, pickupClickPoint.y)) {
+                    doTap(pickupClickPoint.x, pickupClickPoint.y);
+                    sleep(200);
+                    sceneExecuting = false;
+                    monitorExecStepName = "";
+                    monitorExecRemainMs = 0;
+                    updateInfo(true);
+                    for (var pickupCd = 3; pickupCd > 0; pickupCd--) {
+                        if (!monitoring || myMonitoringWorkerId !== monitoringWorkerId) break;
+                        nextOcrRemainSec = pickupCd;
+                        updateInfo();
+                        sleep(1000);
+                    }
+                    continue;
+                }
+
+                var triggeredNow = deathRet.found && !lastWatchFound && !sceneExecuting;
+                lastWatchFound = !!deathRet.found;
 
                 if (triggeredNow) {
                     sceneExecuting = true;
+                    if (deathClickEnabled && deathClickPoint && isValidPoint(deathClickPoint.x, deathClickPoint.y)) {
+                        doTap(deathClickPoint.x, deathClickPoint.y);
+                        var deathWait = normalizeDelay(deathClickWaitMs, 1000);
+                        if (deathWait > 0) sleep(deathWait);
+                    }
                     if (skillLoopRunning) {
                         stopSkillLoop(false);
                         waitForSkillLoopStop(1500);
@@ -1431,7 +1802,7 @@ function startMonitoring() {
                         monitorExecRemainMs = step.delay;
                         updateInfo();
 
-                        doTap(step.x, step.y);
+                        doStepAction(step);
 
                         var remain = step.delay;
                         while (remain > 0 && monitoring && myMonitoringWorkerId === monitoringWorkerId) {
@@ -1880,6 +2251,14 @@ function saveConfig() {
             watchText: watchText,
             watchRegion: watchRegion,
             watchIntervalSec: watchIntervalSec,
+            deathClickEnabled: deathClickEnabled,
+            deathClickPoint: deathClickPoint,
+            deathClickWaitMs: deathClickWaitMs,
+            pickupText: pickupText,
+            pickupRegion: pickupRegion,
+            pickupClickEnabled: pickupClickEnabled,
+            pickupClickPoint: pickupClickPoint,
+            pickupReuseWatchRegion: pickupReuseWatchRegion,
             mainWinPos: mainWinPos,
             miniWinPos: miniWinPos,
             minimized: minimized,
@@ -1904,9 +2283,17 @@ function loadConfig() {
             var data = JSON.parse(txt);
 
             pressTime = typeof data.pressTime === "number" ? data.pressTime : 50;
-            watchText = data.watchText || "确认";
+            watchText = data.watchText || "基本";
             watchRegion = data.watchRegion || null;
-            watchIntervalSec = typeof data.watchIntervalSec === "number" ? data.watchIntervalSec : 2;
+            watchIntervalSec = typeof data.watchIntervalSec === "number" ? data.watchIntervalSec : 10;
+            deathClickEnabled = typeof data.deathClickEnabled === "boolean" ? data.deathClickEnabled : true;
+            deathClickPoint = data.deathClickPoint || null;
+            deathClickWaitMs = typeof data.deathClickWaitMs === "number" ? data.deathClickWaitMs : 1000;
+            pickupText = data.pickupText || "拾取";
+            pickupRegion = data.pickupRegion || null;
+            pickupClickEnabled = !!data.pickupClickEnabled;
+            pickupClickPoint = data.pickupClickPoint || null;
+            pickupReuseWatchRegion = typeof data.pickupReuseWatchRegion === "boolean" ? data.pickupReuseWatchRegion : true;
             mainWinPos = data.mainWinPos || mainWinPos;
             miniWinPos = data.miniWinPos || miniWinPos;
             minimized = !!data.minimized;
@@ -1944,10 +2331,18 @@ function loadConfig() {
         }
     } catch (e) {
         log("loadConfig error: " + e);
-        watchText = "确认";
+        watchText = "基本";
         watchRegion = null;
-        watchIntervalSec = 2;
+        watchIntervalSec = 10;
         pressTime = 50;
+        deathClickEnabled = true;
+        deathClickPoint = null;
+        deathClickWaitMs = 1000;
+        pickupText = "拾取";
+        pickupRegion = null;
+        pickupClickEnabled = false;
+        pickupClickPoint = null;
+        pickupReuseWatchRegion = true;
         mainWinPos = { x: 80, y: 220 };
         miniWinPos = { x: 80, y: 220 };
         minimized = false;
