@@ -38,12 +38,12 @@ var skillExecStepName = "";
 
 var sceneExecuting = false;
 var monitoringWorkerId = 0;
+var deathCount = 0;
 
 var skillLoopRunning = false;
 var skillLoopWorkerId = 0;
 
 // OCR触发控制
-var lastWatchFound = false;
 var screenCaptureReady = false;
 
 // 通用
@@ -235,8 +235,12 @@ if (minimized) {
     try { win.setSize(0, 0); } catch (e1) {}
     try { win.setPosition(-3000, -3000); } catch (e2) {}
     try { miniWin.setSize(-2, -2); } catch (e3) {}
+    try { miniWin.setPosition(miniWinPos.x, miniWinPos.y); } catch (e4) {}
 } else {
-    miniWin.setSize(0, 0);
+    try { win.setSize(-2, -2); } catch (e5) {}
+    try { win.setPosition(mainWinPos.x, mainWinPos.y); } catch (e6) {}
+    try { miniWin.setSize(0, 0); } catch (e7) {}
+    try { miniWin.setPosition(-3000, -3000); } catch (e8) {}
 }
 updateInfo(true);
 
@@ -395,9 +399,8 @@ function updateInfo(force) {
 
         var lines = [];
         lines.push("死亡识别: " + (watchText || "-"));
-        lines.push("死亡区域: " + regionText(watchRegion));
         lines.push("拾取识别: " + (pickupText || "-"));
-        lines.push("拾取区域: " + (pickupReuseWatchRegion ? ("复用死亡区域(" + regionText(watchRegion) + ")") : regionText(pickupRegion)));
+        lines.push("死亡次数: " + deathCount);
         lines.push("步骤场景: " + scene.name + " (" + scene.steps.length + "步)");
         lines.push("当前角色: " + role.name + " (" + role.skills.length + "技能)");
         lines.push("死亡点击: 默认开启(" + pointText(deathClickPoint) + ") 等待" + deathClickWaitMs + "ms");
@@ -1734,7 +1737,6 @@ function startMonitoring() {
     monitoringWorkerId += 1;
     var myMonitoringWorkerId = monitoringWorkerId;
     sceneExecuting = false;
-    lastWatchFound = false;
     nextOcrRemainSec = 0;
     monitorExecRemainMs = 0;
     monitorExecStepName = "";
@@ -1776,10 +1778,10 @@ function startMonitoring() {
                     continue;
                 }
 
-                var triggeredNow = deathRet.found && !lastWatchFound && !sceneExecuting;
-                lastWatchFound = !!deathRet.found;
+                var triggeredNow = deathRet.found && !sceneExecuting;
 
                 if (triggeredNow) {
+                    deathCount += 1;
                     sceneExecuting = true;
                     if (deathClickEnabled && deathClickPoint && isValidPoint(deathClickPoint.x, deathClickPoint.y)) {
                         doTap(deathClickPoint.x, deathClickPoint.y);
@@ -1876,7 +1878,6 @@ function startMonitoring() {
             monitorExecStepName = "";
             monitorExecRemainMs = 0;
             nextOcrRemainSec = 0;
-            lastWatchFound = false;
             updateInfo();
             toast("监控异常: " + e);
             log("startMonitoring error: " + e);
@@ -1888,7 +1889,6 @@ function startMonitoring() {
             monitorExecStepName = "";
             monitorExecRemainMs = 0;
             nextOcrRemainSec = 0;
-            lastWatchFound = false;
             updateInfo();
         }
     });
@@ -1898,7 +1898,6 @@ function stopMonitoring() {
     monitoring = false;
     monitoringWorkerId += 1;
     sceneExecuting = false;
-    lastWatchFound = false;
     monitorExecStepName = "";
     monitorExecRemainMs = 0;
     nextOcrRemainSec = 0;
@@ -2259,6 +2258,7 @@ function saveConfig() {
             pickupClickEnabled: pickupClickEnabled,
             pickupClickPoint: pickupClickPoint,
             pickupReuseWatchRegion: pickupReuseWatchRegion,
+            deathCount: deathCount,
             mainWinPos: mainWinPos,
             miniWinPos: miniWinPos,
             minimized: minimized,
@@ -2294,6 +2294,7 @@ function loadConfig() {
             pickupClickEnabled = !!data.pickupClickEnabled;
             pickupClickPoint = data.pickupClickPoint || null;
             pickupReuseWatchRegion = typeof data.pickupReuseWatchRegion === "boolean" ? data.pickupReuseWatchRegion : true;
+            deathCount = typeof data.deathCount === "number" ? data.deathCount : 0;
             mainWinPos = data.mainWinPos || mainWinPos;
             miniWinPos = data.miniWinPos || miniWinPos;
             minimized = !!data.minimized;
@@ -2343,6 +2344,7 @@ function loadConfig() {
         pickupClickEnabled = false;
         pickupClickPoint = null;
         pickupReuseWatchRegion = true;
+        deathCount = 0;
         mainWinPos = { x: 80, y: 220 };
         miniWinPos = { x: 80, y: 220 };
         minimized = false;
